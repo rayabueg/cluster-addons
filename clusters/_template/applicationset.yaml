@@ -1,0 +1,67 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: cluster-addons-__CLUSTER_NAME__
+  namespace: argocd
+spec:
+  generators:
+    - git:
+        repoURL: https://github.com/rayabueg/cluster-addons.git
+        revision: __BRANCH__
+        directories:
+          - path: clusters/__CLUSTER_NAME__/addons/*
+  template:
+    metadata:
+      name: '{{path.basename}}-__CLUSTER_NAME__'
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/rayabueg/cluster-addons.git
+        targetRevision: __BRANCH__
+        path: '{{path}}'
+      destination:
+        server: https://kubernetes.default.svc
+        # Default namespace — resources with explicit namespaces use their own.
+        # Application CRDs rendered by Helm addons have metadata.namespace: argocd.
+        namespace: argocd
+      ignoreDifferences:
+        # CRDs: Kubernetes 1.30+ auto-injects selectableFields into CRD spec at runtime.
+        # Also ignore last-applied-configuration annotation and status (both runtime-only).
+        - group: apiextensions.k8s.io
+          kind: CustomResourceDefinition
+          jqPathExpressions:
+            - .spec.versions[].selectableFields
+          jsonPointers:
+            - /metadata/annotations/kubectl.kubernetes.io~1last-applied-configuration
+            - /status
+        # Webhooks: caBundle injected at runtime by cert-manager cainjector / istiod.
+        # failurePolicy toggled by istiod between Ignore (starting) and Fail (ready).
+        - group: admissionregistration.k8s.io
+          kind: ValidatingWebhookConfiguration
+          jqPathExpressions:
+            - .webhooks[].clientConfig.caBundle
+            - .webhooks[].failurePolicy
+          jsonPointers:
+            - /metadata/annotations/kubectl.kubernetes.io~1last-applied-configuration
+        - group: admissionregistration.k8s.io
+          kind: MutatingWebhookConfiguration
+          jqPathExpressions:
+            - .webhooks[].clientConfig.caBundle
+            - .webhooks[].failurePolicy
+          jsonPointers:
+            - /metadata/annotations/kubectl.kubernetes.io~1last-applied-configuration
+      syncPolicy:
+        syncOptions:
+          - CreateNamespace=true
+          # Note: ServerSideApply is omitted — client-side apply is used so that
+          # ignoreDifferences works correctly for resources with runtime-injected fields.
+          - SkipDryRunOnMissingResource=true
+        automated:
+          prune: true
+          selfHeal: true
+        retry:
+          limit: 15
+          backoff:
+            duration: 15s
+            factor: 2
+            maxDuration: 5m
