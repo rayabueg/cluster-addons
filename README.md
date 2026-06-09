@@ -1,73 +1,68 @@
 # cluster-addons
 
-Source-of-truth for cluster infrastructure and addons. Argo CD syncs this repo continuously.
+Cluster-config repo for the k8s-lab platform. Holds **per-cluster subscriptions**
+to the addon library at [`rayabueg/platform-addons`](https://github.com/rayabueg/platform-addons).
+Argo CD syncs this repo continuously.
 
 The user-facing apps half lives in [`cluster-applications`](https://github.com/rayabueg/cluster-applications).
 
-## Structure
+> **Shape:** this repo follows the Gen2 `sdp-cluster-addons` model — a `base/`
+> uprev surface that remote-refs a versioned addon library, plus one directory
+> per cluster. The Gen1 wave model (`waves/wave1`, `waves/wave2`) and in-repo
+> rendered manifests have been retired; manifests now live in `platform-addons`
+> and are pinned by git tag.
+
+## Layout
 
 ```
-cluster-addons/
-├── addons/                          # One folder per addon
-│   └── <name>/
-│       ├── base/
-│       │   ├── latest/              # Output of the most recent render
-│       │   │   ├── bundle.yaml      # Rendered Helm output (helm template)
-│       │   │   └── kustomization.yaml
-│       │   └── stable/              # Promoted copy of latest (what wave1 points at)
-│       │       ├── bundle.yaml
-│       │       └── kustomization.yaml
-│       └── hack/
-│           ├── render.sh            # Re-renders bundle.yaml from Helm chart
-│           ├── promote.sh           # Copies latest/ → stable/
-│           └── values.yaml          # Helm values used by render.sh
-├── waves/
-│   ├── wave1/                       # Production-track: refs addons/*/base/stable
-│   │   └── <name>/kustomization.yaml
-│   └── wave2/                       # Canary-track: refs addons/*/base/latest
-│       └── <name>/kustomization.yaml
-├── clusters/
-│   └── k8s-lab/
-│       ├── kustomization.yaml       # Renders the ApplicationSet
-│       ├── applicationset.yaml      # Discovers clusters/k8s-lab/addons/*
-│       └── addons/
-│           └── <name>/
-│               └── kustomization.yaml  # Points to waves/wave1/<name>
-└── bootstrap/
-    └── argocd/
-        └── root-app.yaml            # Bootstrap: apply once to seed Argo CD
+base/<addon>/kustomization.yaml          # remote ref to platform-addons//<addon>/manifests?ref=platform-vX.Y.Z
+clusters/
+  _template/                             # copyable per-cluster skeleton
+  k8s-lab/
+    applicationset.yaml                  # Argo CD ApplicationSet (one per cluster)
+    kustomization.yaml                   # namesuffix: -k8s-lab; wraps the AppSet
+    addons/<addon>/kustomization.yaml    # references ../../../../base/<addon> + per-cluster patches
+bootstrap/argocd/root-app.yaml           # bootstrap: apply once to seed Argo CD
 ```
 
-**Non-Helm addons** (namespaces, core-dns, crds, envoy-gateway) store raw YAML in `base/latest/`
-and have no `hack/` folder. Wave1 references `base/latest` directly for these.
+`base/<addon>` is the **single uprev surface** — bumping its `?ref=` to a newer
+`platform-vX.Y.Z` tag rolls that addon forward on every cluster that subscribes.
+Per-cluster directories hold cluster-specific patches.
 
-**HTTPRoutes belong to the app they route to:**
-- `argocd-config` addon owns the ArgoCD HTTPRoute (`argocd-httproute.yaml`)
-- `hubble` addon owns the Hubble UI HTTPRoute (`httproute.yaml`)
-- App HTTPRoutes live in `cluster-applications/apps-envs/<app>/httproute.yaml`
+## Addon → cluster mapping
 
-**`envoy-gateway` addon is pure infrastructure** — only `eg-gateway.yaml` (Gateway) and
-`eg-envoyproxy.yaml` (EnvoyProxy config). No application resources.
+Each cluster carries only the addons whose tag set intersects its own. The lab
+cluster `k8s-lab` is tagged `application kubeadm`. Addon eligibility is declared
+in `platform-addons/<addon>/metadata.yaml spec.clusters`; this repo decides where
+an addon *actually* runs by creating a subscription under
+`clusters/<cluster>/addons/<addon>/`.
 
-## Addons
+## Versioning (no waves)
 
-| Addon | Type | Notes |
-|---|---|---|
-| `argocd-config` | Raw YAML | Insecure mode ConfigMap + ArgoCD HTTPRoute |
-| `cert-manager` | Helm | CRDs + controller |
-| `core-dns` | Raw YAML | Custom DNS entries ConfigMap |
-| `crds` | Raw YAML | Gateway API + Envoy Gateway CRDs |
-| `descheduler` | Helm | Pod descheduler |
-| `envoy-gateway` | Raw YAML | Gateway + EnvoyProxy only |
-| `external-dns` | Helm | DNS record automation |
-| `external-secrets` | Helm | Secret sync from external stores |
-| `hubble` | Helm (Cilium) | Hubble relay + UI + HTTPRoute |
-| `istio` | Helm | Base, CNI, istiod, ztunnel |
-| `namespaces` | Raw YAML | Cluster namespace definitions |
+There are no wave folders. Versioning lives in the addon library's git tags:
+
+| Gen1 wave concept | Now |
+|---|---|
+| `wave2` → `addons/*/base/latest` | `platform-addons` `main` (untagged tip) |
+| `wave1` → `addons/*/base/stable` | a pinned `platform-vX.Y.Z` tag |
+| `promote.sh` (latest → stable) | cutting a new tag in `platform-addons` |
+
+### Uprev flow
+
+1. In `platform-addons`, render + commit the change and cut `platform-vX.Y.Z`.
+2. Here, bump every `base/<addon>/kustomization.yaml` `?ref=` to the new tag.
+3. Argo CD reconciles. (At lab scale this is a single `main` branch; the
+   branch-per-env merge-up of upstream Gen2 is not used.)
+
+## Adding a cluster
+
+1. `cp -r clusters/_template clusters/<cluster-name>`.
+2. Substitute `__CLUSTER_NAME__` and `__BRANCH__` in `applicationset.yaml` and
+   `kustomization.yaml`.
+3. Prune `addons/` to the cluster's eligible addons (see mapping above).
+4. Add per-cluster patches under `addons/<addon>/` as needed.
 
 ## Bootstrap
-
-Edit `bootstrap/argocd/root-app.yaml` to point at your fork (if applicable), then apply once:
 
 ```bash
 export KUBECONFIG="$HOME/.kube/lima-k8s-lab"
@@ -76,24 +71,25 @@ kubectl apply -f cluster-applications/bootstrap/argocd/root-app.yaml
 kubectl -n argocd get applications
 ```
 
-## Updating a Helm addon
+## Validation
 
 ```bash
-# 1) Edit hack/values.yaml as needed, then re-render
-bash addons/<name>/hack/render.sh
+# every cluster builds (skip _template — it has placeholders)
+for c in clusters/*/; do
+  [ "$(basename "$c")" = "_template" ] && continue
+  kustomize build "$c" >/dev/null && echo "ok: $c" || echo "FAIL: $c"
+done
 
-# 2) Review the diff in base/latest/bundle.yaml, then promote to stable
-bash addons/<name>/hack/promote.sh
-
-# 3) Commit and push — Argo CD picks up the change automatically
-git add -A && git commit -m "addons(<name>): ..." && git push
+# every base ref resolves (requires platform-addons pushed + tagged on GitHub)
+for b in base/*/; do
+  kustomize build "$b" >/dev/null && echo "ok: $b" || echo "FAIL: $b"
+done
 ```
 
 ## Contributing
 
-Format: `scope: summary`  
-Examples: `addons: add descheduler`, `crds: bump gateway-api`, `envoy-gateway: add listener`
+Format: `scope: summary` — e.g. `base: uprev platform-v0.2.0`,
+`k8s-lab: istio — add per-cluster patch`, `add cluster: <name>`.
 
 If working from the parent `k8s-lab` repo, this folder is a **git submodule**:
-1. Commit + push changes here first
-2. Commit the updated submodule pointer in the parent repo
+commit + push here first, then commit the updated submodule pointer in the parent.

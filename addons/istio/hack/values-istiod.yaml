@@ -1,5 +1,0 @@
-profile: ambient
-components:
-  ingressGateways:
-    - name: istio-ingressgateway
-      enabled: false
